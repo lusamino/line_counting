@@ -147,9 +147,9 @@ def _detect_binding_side(gray: np.ndarray, probe_frac: float = 0.1) -> str:
     left_strip = gray[:, :probe_w]
     right_strip = gray[:, w - probe_w :]
 
-    # Dark pixels = value < 80
-    left_dark = np.sum(left_strip < 80)
-    right_dark = np.sum(right_strip < 80)
+    # Dark pixels = value < 120
+    left_dark = np.sum(left_strip < 120)
+    right_dark = np.sum(right_strip < 120)
 
     return "right" if left_dark >= right_dark else "left"
 
@@ -157,9 +157,10 @@ def _detect_binding_side(gray: np.ndarray, probe_frac: float = 0.1) -> str:
 def remove_black_margin(
     gray: np.ndarray,
     binding_side: str,
-    dark_threshold: int = 80,
+    dark_threshold: int = 120,
     max_dark_frac: float = 0.50,
     search_frac: float = 0.40,
+    extra_px: int = 10,
 ) -> int:
     """Return the width of the large black patch on the binding edge.
 
@@ -186,6 +187,10 @@ def remove_black_margin(
         column below this fraction.
     search_frac : float
         Maximum fraction of image width to scan from the binding edge.
+    extra_px : int
+        Additional pixels to mask inward beyond the detected edge.  Positive
+        values push the mask further into the page (right if the black patch
+        is on the left, left if it is on the right).  Default 0.
 
     Returns
     -------
@@ -199,24 +204,25 @@ def remove_black_margin(
     if binding_side == "right":
         for i in range(max_search):
             if col_dark[i] < max_dark_frac:
-                return i
-        return max_search
+                return min(w, i + extra_px)
+        return min(w, max_search + extra_px)
     else:
         for i in range(max_search):
             col = w - 1 - i
             if col_dark[col] < max_dark_frac:
-                return i
-        return max_search
+                return min(w, i + extra_px)
+        return min(w, max_search + extra_px)
 
 
 def remove_top_bottom_black(
     gray: np.ndarray,
-    dark_threshold: int = 80,
+    dark_threshold: int = 120,
     max_dark_frac: float = 0.50,
     search_frac: float = 0.20,
     ruler_search_frac: float = 0.08,
     ruler_min_std: float = 20.0,
     ruler_max_mean: float = 180.0,
+    extra_px: int = 10,
 ) -> Tuple[int, int, int]:
     """Return the heights of the top black patch, ruler band, and bottom black patch.
 
@@ -248,14 +254,17 @@ def remove_top_bottom_black(
         part of the ruler (ruler has alternating dark/bright segments).
     ruler_max_mean : float
         Maximum row mean brightness for a ruler row (rules out white rows).
+    extra_px : int
+        Additional rows to mask inward beyond each detected edge — downward
+        for the top margin and upward for the bottom margin.  Default 0.
 
     Returns
     -------
     (top_margin, ruler_height, bottom_margin) : Tuple[int, int, int]
-        top_margin    — rows of solid black at the top.
+        top_margin    — rows of solid black at the top (plus extra_px).
         ruler_height  — rows of ruler just below the top black patch (0 if
                         no ruler is detected).
-        bottom_margin — rows of solid black at the bottom.
+        bottom_margin — rows of solid black at the bottom (plus extra_px).
     """
     h, w = gray.shape
     max_search = int(h * search_frac)
@@ -289,7 +298,7 @@ def remove_top_bottom_black(
         else:
             break
 
-    return top_margin, ruler_height, bottom_margin
+    return min(h, top_margin + extra_px), ruler_height, min(h, bottom_margin + extra_px)
 
 
 def mask_page_borders(
@@ -361,8 +370,8 @@ def detect_binding(
     masked: np.ndarray,
     border_info: dict,
     strip_frac: float = 0.20,
-    smooth_frac: float = 0.05,
-    prominence_frac: float = 0.10,
+    smooth_frac: float = 0.10,
+    prominence_frac: float = 0.05,
 ) -> Tuple[np.ndarray, int]:
     """Locate the physical fold and refine the binding-side mask.
 
@@ -455,6 +464,111 @@ def detect_binding(
     return result, binding_width
 
 
+def detect_binding_valley(
+    gray: np.ndarray,
+    masked: np.ndarray,
+    border_info: dict,
+    strip_frac: float = 0.20,
+    valley_frac: float = 0.05,
+    smooth_frac: float = 0.05,
+) -> Tuple[np.ndarray, int]:
+    """Locate the physical fold using a column-sum valley on the binary masked image.
+
+    Examines the inner *strip_frac* of columns on the binding side of the
+    **masked binary** image.  Column sums represent ink density: a bright
+    gap between facing-page bleed and page text produces a deep valley
+    (low column sum = few foreground pixels).
+
+    Algorithm:
+    1. Extract a strip of width ``strip_frac * image_width`` from the
+       binding side of *masked*.
+    2. Compute the column sum across all rows.
+    3. Apply a uniform (box) smoothing of width ``smooth_frac * strip_w``
+       columns to merge adjacent low-density columns into a coherent valley.
+    4. Find the threshold at the *valley_frac* quantile of the smoothed sums.
+    5. Among all columns whose smoothed sum falls at or below that threshold
+       (the deepest valleys), choose the column **closest to the binding edge**
+       as the fold position.
+    6. Mask every pixel between the binding edge and the fold, then return.
+
+    Falls back to ``border_info['margin_width']`` when no columns pass the
+    valley threshold (i.e. the strip is uniformly dark or uniformly white).
+
+    Parameters
+    ----------
+    gray : np.ndarray
+        Deskewed grayscale image (not used for detection, kept for API
+        consistency with ``detect_binding``).
+    masked : np.ndarray
+        Binary image already partially masked by ``mask_page_borders``
+        (foreground=255).
+    border_info : dict
+        Output of ``mask_page_borders``; must contain ``'binding_side'``
+        and ``'margin_width'``.
+    strip_frac : float
+        Fraction of image width to examine on the binding side.  Default 0.20.
+    valley_frac : float
+        Quantile threshold for selecting valley columns.  Columns whose
+        smoothed sum is at or below this quantile are valley candidates.
+        Default 0.05 (bottom 5 %).
+    smooth_frac : float
+        Smoothing window width as a fraction of the strip width.  A uniform
+        (box) filter of this size is applied to the column sums before valley
+        detection, merging nearby low-density columns.  Set to 0.0 to
+        disable smoothing.  Default 0.05.
+
+    Returns
+    -------
+    updated_masked : np.ndarray
+        Binary image with the binding strip up to the fold additionally zeroed.
+    binding_width : int
+        Total columns masked from the binding edge.
+    """
+    from scipy.ndimage import uniform_filter1d
+
+    h, w = masked.shape
+    binding_side = border_info["binding_side"]
+    fallback = border_info["margin_width"]
+
+    strip_w = max(4, int(w * strip_frac))
+
+    if binding_side == "left":
+        strip = masked[:, :strip_w]
+    else:
+        strip = masked[:, w - strip_w:]
+
+    col_sums = strip.astype(np.float64).sum(axis=0)  # shape (strip_w,)
+
+    # Optional smoothing: merge adjacent columns before valley detection
+    if smooth_frac > 0.0:
+        smooth_w = max(3, int(strip_w * smooth_frac))
+        col_sums = uniform_filter1d(col_sums, size=smooth_w)
+
+    # Valley threshold: the valley_frac quantile of (smoothed) column sums
+    threshold = np.quantile(col_sums, valley_frac)
+
+    valley_cols = np.where(col_sums <= threshold)[0]
+    if valley_cols.size == 0:
+        return masked, fallback
+
+    result = masked.copy()
+
+    if binding_side == "left":
+        # Strip spans columns [0, strip_w).  The column closest to the left
+        # (binding) edge is the one with the smallest strip-local index.
+        fold_local = int(valley_cols.min())
+        binding_width = fold_local
+        result[:, :binding_width] = 0
+    else:
+        # Strip spans columns [w - strip_w, w).  The column closest to the
+        # right (binding) edge has the largest strip-local index.
+        fold_local = int(valley_cols.max())
+        binding_width = strip_w - fold_local
+        result[:, w - binding_width:] = 0
+
+    return result, binding_width
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
@@ -464,6 +578,8 @@ def preprocess(
     sauvola_window: int = 51,
     sauvola_k: float = 0.2,
     deskew_range: float = 5.0,
+    model_path: str | None = None,
+    device: str = "cpu",
 ) -> dict:
     """Full Stages 1–2 preprocessing pipeline.
 
@@ -521,8 +637,40 @@ def preprocess(
     masked, border_info = mask_page_borders(gray, binary_desk)
 
     # Stage 2 — detect fold valley and refine the binding-side mask
-    masked, binding_width = detect_binding(gray, masked, border_info)
+    #masked, binding_width = detect_binding(gray, masked, border_info)
+    masked, binding_width = detect_binding_valley(gray, masked, border_info)
     border_info["binding_width"] = binding_width
+
+    # Stage 2b — if binding is tiny, re-detect using Kraken text mask only ──
+    # A binding_width < 10 px means the valley finder was likely confused by
+    # figure ink or facing-page bleed-through.  Running Kraken on the current
+    # image gives us a text-only binary that exposes the true fold.
+    if binding_width < 10:
+        print(
+            f"[preprocess] binding_width={binding_width} < 10 px — "
+            "re-detecting binding using Kraken text mask."
+        )
+        from .masking import mask_non_text_kraken as _mntk
+        nz = cv2.findNonZero(masked)
+        if nz is not None:
+            cx, cy, cw, ch = cv2.boundingRect(nz)
+        else:
+            cy, cx = 0, 0
+            ch, cw = masked.shape  
+        bgr_desk_pre    = bgr_desk[cy : cy + ch, cx : cx + cw]
+        masked_pre      = masked[cy : cy + ch, cx : cx + cw]  
+        gray_pre        = gray[cy : cy + ch, cx : cx + cw]            
+        _mres = _mntk(bgr_desk_pre, masked_pre, model_path=model_path, device=device, dilation_px = 8)
+        _text_only = _mres.text_binary  # uint8 0/255, ink inside text polygons only
+        masked_pre, binding_width = detect_binding_valley(gray_pre, _text_only, border_info)
+        border_info["binding_width"] = binding_width
+        # Re-apply the new binding strip to the full masked image so that figure
+        # pixels between the binding edge and the fold are also zeroed out.
+        if border_info["binding_side"] == "left":
+            masked[:, :binding_width] = 0
+        else:
+            h_tmp, w_tmp = masked.shape
+            masked[:, w_tmp - binding_width:] = 0
 
     # ── Crop all images to the tight bounding box of the masked content ──────
     # Using the non-zero region of the masked binary guarantees every returned

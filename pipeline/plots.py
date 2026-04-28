@@ -24,7 +24,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .stages import PreprocessResult, SegmentKrakenResult
+from .stages import PreprocessResult, SegmentKrakenResult, PostprocessResult
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def plot_kraken_polygons(
     poly_img = _bgr2rgb(pre.bgr).copy()
     for boundary in result.line_boundaries:
         pts = np.array(boundary, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.polylines(poly_img, [pts], isClosed=True, color=(0, 180, 255), thickness=1)
+        cv2.polylines(poly_img, [pts], isClosed=True, color=(0, 180, 255), thickness=3)
 
     ax.imshow(poly_img)
     ax.set_title("Kraken line boundaries", fontsize=11)
@@ -339,12 +339,127 @@ def plot_segment_kraken(
 
 
 # ---------------------------------------------------------------------------
-# plot_postprocess  (placeholder — to be added once postprocess is populated)
+# plot_postprocess
 # ---------------------------------------------------------------------------
 
-def plot_postprocess(*args, **kwargs):
-    """Placeholder — will visualise postprocess output once that stage is built."""
-    raise NotImplementedError(
-        "plot_postprocess is not yet implemented; "
-        "populate postprocess() first."
+def plot_postprocess(
+    result: "PostprocessResult",
+    pre: PreprocessResult,
+    seg: Optional[SegmentKrakenResult] = None,
+    figsize: tuple = (18, 9),
+) -> plt.Figure:
+    """Visualise the output of ``postprocess``.
+
+    Two panels (left → right):
+
+    1. **Original BGR** — deskewed/cropped image with no annotations, for
+       reference.
+    2. **Annotated overlay** — same image with:
+       - Semi-transparent yellow fill over figure ink pixels (from
+         ``seg.figure_binary`` when *seg* is provided, otherwise bounding
+         boxes are used as a fallback).
+       - Red polygons for each surviving Kraken text-line boundary.
+       - Green vertical gutter line when a double-column layout is detected.
+
+    Parameters
+    ----------
+    result : PostprocessResult
+    pre    : PreprocessResult  (provides ``bgr`` image)
+    seg    : SegmentKrakenResult, optional
+        Provide to use the pixel-accurate ``figure_binary`` mask for the
+        yellow tint.  Falls back to bounding-box rectangles when omitted.
+    figsize : (width, height) in inches
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    if not isinstance(result, PostprocessResult):
+        raise TypeError(f"Expected PostprocessResult, got {type(result).__name__}")
+    if not isinstance(pre, PreprocessResult):
+        raise TypeError(f"Expected PreprocessResult, got {type(pre).__name__}")
+
+    bgr_rgb = _bgr2rgb(pre.bgr)
+    annotated = bgr_rgb.copy().astype(np.float32)
+
+    # ── Figure ink: semi-transparent yellow tint ──────────────────────────
+    if seg is not None and seg.figure_binary is not None and seg.figure_binary.any():
+        fig_mask = seg.figure_binary > 0
+        fig_overlay = annotated.copy()
+        fig_overlay[fig_mask] = [220, 220, 0]   # RGB yellow
+        annotated = (0.4 * fig_overlay + 0.6 * annotated).clip(0, 255)
+    elif result.figure_bboxes:
+        # Fallback: paint bounding-box rectangles
+        fig_overlay = annotated.copy()
+        for x, y, w, h in result.figure_bboxes:
+            fig_overlay[y : y + h, x : x + w] = [220, 220, 0]
+        annotated = (0.4 * fig_overlay + 0.6 * annotated).clip(0, 255)
+
+    annotated = annotated.astype(np.uint8)
+
+    # ── Kept text-line polygons (red) ─────────────────────────────────────
+    for boundary in result.line_boundaries:
+        pts = np.array(boundary, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(annotated, [pts], isClosed=True, color=(220, 0, 0), thickness=2)
+
+    # ── Gutter line (green) ───────────────────────────────────────────────
+    if result.is_double_column and result.gutter_x is not None:
+        cv2.line(
+            annotated,
+            (result.gutter_x, result.gutter_y_min),
+            (result.gutter_x, result.gutter_y_max),
+            (0, 200, 0),   # RGB green
+            thickness=4,
+        )
+
+    # ── Figure ────────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    axes[0].imshow(bgr_rgb)
+    axes[0].set_title("BGR — deskewed & cropped", fontsize=12)
+    axes[0].set_xlabel(
+        f"{pre.image_w} × {pre.image_h} px  |  "
+        f"skew: {pre.deskew_angle:+.2f}°  |  binding: {pre.binding_side}",
+        fontsize=9,
     )
+
+    axes[1].imshow(annotated)
+    axes[1].set_title("Postprocess overlay", fontsize=12)
+
+    # Build a compact annotation string
+    layout = (
+        f"double-column  gutter_x={result.gutter_x}"
+        if result.is_double_column
+        else "single-column"
+    )
+    axes[1].set_xlabel(
+        f"lines: {result.n_lines}  "
+        f"(−corner {result.n_lines_removed_corner}, −narrow {result.n_lines_removed_narrow})  |  "
+        f"figures: {result.n_figures}  "
+        f"(−corner {result.n_figures_removed_corner}, −narrow {result.n_figures_removed_narrow})  |  "
+        f"{layout}",
+        fontsize=9,
+    )
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor=(0.86, 0, 0), label="text-line boundary"),
+        mpatches.Patch(facecolor=(0.86, 0.86, 0), alpha=0.7, label="figure region"),
+    ]
+    if result.is_double_column:
+        legend_handles.append(
+            mpatches.Patch(facecolor=(0, 0.78, 0), label="gutter")
+        )
+    axes[1].legend(handles=legend_handles, loc="lower right", fontsize=8)
+
+    for ax in axes:
+        _off(ax)
+
+    fig.suptitle(
+        f"Postprocess  —  {result.n_lines} lines  |  {result.n_figures} figures  |  {layout}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout()
+    return fig
+

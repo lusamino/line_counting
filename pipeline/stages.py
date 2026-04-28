@@ -26,7 +26,7 @@ import numpy as np
 
 from .preprocessing import preprocess
 from .masking import mask_non_text_kraken
-from .postprocessing import remove_corner_bboxes, remove_narrow_bboxes
+from .postprocessing import remove_corner_bboxes, remove_narrow_bboxes, detect_and_split_gutter
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +82,8 @@ def preprocess_page(
     sauvola_window: int = 51,
     sauvola_k: float = 0.2,
     deskew_range: float = 5.0,
+    model_path: Optional[str] = None,
+    device: str = "cpu",
 ) -> PreprocessResult:
     """Run preprocessing: binarise, deskew, mask borders, crop to content.
 
@@ -105,6 +107,8 @@ def preprocess_page(
         sauvola_window=sauvola_window,
         sauvola_k=sauvola_k,
         deskew_range=deskew_range,
+        model_path=model_path,
+        device=device,
     )
     bi = prep["border_info"]
     h, w = prep["gray"].shape
@@ -309,24 +313,34 @@ class PostprocessResult:
     n_figures_removed_corner: int
     n_figures_removed_narrow: int
 
+    # Column layout detection
+    is_double_column: bool
+    gutter_x: Optional[int]       # x position of detected gutter, or None
+    gutter_y_min: Optional[int]   # top of gutter span
+    gutter_y_max: Optional[int]   # bottom of gutter span
+    n_lines_split: int            # number of polygons split at the gutter
+
 
 def postprocess(
     pre: PreprocessResult,
     seg: SegmentKrakenResult,
     corner_fraction: float = 0.10,
     min_dimension_px: int = 20,
+    min_gutter_fraction: float = 0.50,
+    single_col_threshold: float = 0.70,
 ) -> PostprocessResult:
-    """Clean up segmentation results by removing artefactual bounding boxes.
+    """Clean up segmentation results by removing artefactual bounding boxes
+    and detecting a double-column gutter.
 
-    Two sequential filters are applied:
+    Three sequential steps are applied:
 
     1. **Corner filter** — removes detections whose centroid falls inside one
        of the two corners adjacent to the binding spine (top and bottom).
-       The corner zone is a square of ``corner_fraction * image_width`` ×
-       ``corner_fraction * image_height``.
-
-    2. **Narrow filter** — removes detections whose bounding box has a shorter
-       side below ``min_dimension_px`` pixels (ruling lines, scan edges, etc.).
+    2. **Narrow filter** — removes detections whose bounding box is thinner
+       than ``min_dimension_px`` pixels.
+    3. **Gutter detection** — finds a central column-separator gap present in
+       at least ``min_gutter_fraction`` of lines.  Line polygons that cross
+       the gutter are split into left and right sub-polygons.
 
     Parameters
     ----------
@@ -336,6 +350,9 @@ def postprocess(
         Size of each corner zone as a fraction of image dimensions (default 0.10).
     min_dimension_px : int
         Minimum short-side size in pixels for a bbox to be kept (default 20).
+    min_gutter_fraction : float
+        Minimum fraction of lines that must be non-spanning for a gutter to be
+        declared (default 0.60).
 
     Returns
     -------
@@ -358,6 +375,16 @@ def postprocess(
         min_dimension_px=min_dimension_px,
     )
 
+    # 3. Gutter detection + line splitting
+    lines, gutter_x, gutter_y_min, gutter_y_max, is_double_col, n_split = \
+        detect_and_split_gutter(
+            lines,
+            image_w=pre.image_w,
+            image_h=pre.image_h,
+            min_gutter_fraction=min_gutter_fraction,
+            single_col_threshold=single_col_threshold,
+        )
+
     return PostprocessResult(
         line_boundaries=lines,
         n_lines=len(lines),
@@ -367,4 +394,9 @@ def postprocess(
         n_lines_removed_narrow=nl_n,
         n_figures_removed_corner=nf_c,
         n_figures_removed_narrow=nf_n,
+        is_double_column=is_double_col,
+        gutter_x=gutter_x,
+        gutter_y_min=gutter_y_min,
+        gutter_y_max=gutter_y_max,
+        n_lines_split=n_split,
     )

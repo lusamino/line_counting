@@ -83,7 +83,7 @@ def compute_structural_features(
 ) -> np.ndarray:
     """Build a normalised structural feature vector from the three pipeline stages.
 
-    Features (22 total)
+    Features (24 total)
     -------------------
     From PreprocessResult
     ~~~~~~~~~~~~~~~~~~~~~
@@ -107,14 +107,16 @@ def compute_structural_features(
     [14] figure mean bbox area / (image_h * image_w)  (0 if no figures)
     [15] figure std  bbox area / (image_h * image_w)  (0 if ≤1 figure)
 
-    From PostprocessResult (after corner + narrow filtering)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    From PostprocessResult (after corner + narrow filtering + gutter detection)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     [16] n_lines_post / image_h
     [17] n_lines_removed_corner / max(1, seg.n_lines)
     [18] n_lines_removed_narrow / max(1, seg.n_lines)
     [19] n_figures_post / (image_h * image_w / 1e5)
     [20] n_figures_removed_corner / max(1, seg.n_figures)
     [21] n_figures_removed_narrow / max(1, seg.n_figures)
+    [22] is_double_column  (0.0 or 1.0)
+    [23] gutter_x / image_w  (0.0 if not detected)
     """
     H  = max(1, pre.image_h)
     W  = max(1, pre.image_w)
@@ -161,6 +163,8 @@ def compute_structural_features(
         post.n_figures / max(1, HW / 1e5),
         post.n_figures_removed_corner / max(1, seg.n_figures),
         post.n_figures_removed_narrow / max(1, seg.n_figures),
+        float(post.is_double_column),
+        post.gutter_x / W if post.gutter_x is not None else 0.0,
     ]
 
     return np.array(pre_feats + seg_feats + post_feats, dtype=np.float32)
