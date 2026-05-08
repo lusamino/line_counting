@@ -2,7 +2,7 @@
 """Streamlit app — calibrate preprocessing (detect_binding_valley) parameters.
 
 Run with:
-    streamlit run 0_ParametersPreprocess.py
+    streamlit run 0_TuningPreprocess.py
 """
 
 from __future__ import annotations

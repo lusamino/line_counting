@@ -163,6 +163,7 @@ def process_image(
     device: str = "cpu",
     corner_fraction: float = 0.10,
     min_dimension_px: int = 20,
+    dark_threshold: int = 120,
     compute_embed: bool = True,
     use_vit_mask: bool = False,
     min_gutter_fraction: float = 0.50,
@@ -184,7 +185,7 @@ def process_image(
 
     # ── Preprocessing ────────────────────────────────────────────────────
     try:
-        pre = preprocess_page(img_path, model_path=model_path, device=device)
+        pre = preprocess_page(img_path, dark_threshold=dark_threshold, model_path=model_path, device=device)
     except Exception as exc:
         reason = f"preprocess error: {exc}"
         print(f"[ERROR] {img_path.name}: {reason}", file=sys.stderr)
@@ -344,8 +345,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="results.csv",
-        help="Output CSV file path (default: results.csv).",
+        default=None,
+        help="Output CSV file path (default: results/results.csv inside the images directory).",
     )
     parser.add_argument(
         "--model-path",
@@ -402,11 +403,20 @@ def main() -> None:
         if not images:
             print(f"No images found in {exemplars_dir}", file=sys.stderr)
             sys.exit(1)
+        images_dir = exemplars_dir
     elif args.image:
         images = [Path(args.image)]
+        images_dir = Path(args.image).parent
     else:
         print("Provide an image path or use --all.  See --help.", file=sys.stderr)
         sys.exit(1)
+
+    # Resolve output CSV path: default is results/results.csv next to the images
+    if args.output is not None:
+        csv_output = Path(args.output)
+    else:
+        csv_output = images_dir / "results" / "results.csv"
+    csv_output.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Processing {len(images)} image(s)  device={args.device} …")
 
@@ -464,7 +474,7 @@ def main() -> None:
     # Write CSV
     rows = [result_to_row(r) for r in results]
     if rows:
-        write_csv(rows, Path(args.output))
+        write_csv(rows, csv_output)
     else:
         print("No results to write.")
 

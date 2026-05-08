@@ -304,6 +304,7 @@ def remove_top_bottom_black(
 def mask_page_borders(
     gray: np.ndarray,
     binary: np.ndarray,
+    dark_threshold: int = 120,
 ) -> Tuple[np.ndarray, dict]:
     """Detect the binding-side dark margin and remove it from the binary image.
 
@@ -341,7 +342,8 @@ def mask_page_borders(
     binding_side = _detect_binding_side(gray)
 
     # ── Step 2: find and remove the lateral dark margin ──────────────────────
-    margin_width = remove_black_margin(gray, binding_side)
+    margin_width = remove_black_margin(gray, binding_side,
+                                       dark_threshold=dark_threshold)
 
     if binding_side == "right":
         masked[:, :margin_width] = 0
@@ -349,7 +351,8 @@ def mask_page_borders(
         masked[:, w - margin_width :] = 0
 
     # ── Step 3: find and remove top/bottom black patches + ruler ─────────────
-    top_margin, ruler_height, bottom_margin = remove_top_bottom_black(gray)
+    top_margin, ruler_height, bottom_margin = remove_top_bottom_black(
+        gray, dark_threshold=dark_threshold)
 
     masked[:top_margin, :] = 0
     if bottom_margin:
@@ -578,6 +581,7 @@ def preprocess(
     sauvola_window: int = 51,
     sauvola_k: float = 0.2,
     deskew_range: float = 5.0,
+    dark_threshold: int = 120,
     model_path: str | None = None,
     device: str = "cpu",
 ) -> dict:
@@ -634,7 +638,8 @@ def preprocess(
         bgr_desk = bgr.copy()
 
     # Stage 2 — mask dark borders (lateral + top/bottom)
-    masked, border_info = mask_page_borders(gray, binary_desk)
+    masked, border_info = mask_page_borders(gray, binary_desk,
+                                            dark_threshold=dark_threshold)
 
     # Stage 2 — detect fold valley and refine the binding-side mask
     #masked, binding_width = detect_binding(gray, masked, border_info)

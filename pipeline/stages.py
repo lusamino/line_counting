@@ -82,6 +82,7 @@ def preprocess_page(
     sauvola_window: int = 51,
     sauvola_k: float = 0.2,
     deskew_range: float = 5.0,
+    dark_threshold: int = 120,
     model_path: Optional[str] = None,
     device: str = "cpu",
 ) -> PreprocessResult:
@@ -97,7 +98,13 @@ def preprocess_page(
         Sauvola sensitivity parameter.
     deskew_range : float
         Search range (±degrees) for deskewing.
-
+    dark_threshold : int
+        Grayscale pixel values below this are considered "dark" for border detection.
+    model_path : str, optional
+        Path to a Kraken ``.mlmodel`` segmentation file for border detection.
+        Pass ``None`` to use Kraken's built-in default model.
+    device : str
+        PyTorch device string, e.g. ``"cpu"``, ``"mps"`, ``"cuda"``.
     Returns
     -------
     PreprocessResult
@@ -107,6 +114,7 @@ def preprocess_page(
         sauvola_window=sauvola_window,
         sauvola_k=sauvola_k,
         deskew_range=deskew_range,
+        dark_threshold=dark_threshold,
         model_path=model_path,
         device=device,
     )

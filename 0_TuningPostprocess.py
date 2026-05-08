@@ -2,7 +2,7 @@
 """Streamlit app — tune postprocessing parameters interactively.
 
 Run with:
-    streamlit run 0_TuningParameters.py
+    streamlit run 0_TuningPostprocess.py
 """
 
 from __future__ import annotations

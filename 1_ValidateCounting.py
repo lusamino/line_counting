@@ -75,30 +75,34 @@ def _csv_path(folder: Path) -> Path:
     return folder / "results" / CSV_NAME
 
 
-def _load_csv(folder: Path) -> dict[str, int]:
-    """Return {image_name: validated_count} from validation_counting.csv, or {} if absent."""
+def _load_csv(folder: Path) -> tuple[dict[str, int], dict[str, int]]:
+    """Return ({name: validated_count}, {name: line_count}) from CSV, or ({}, {}) if absent."""
     csv_path = _csv_path(folder)
     if not csv_path.is_file():
-        return {}
-    df = pd.read_csv(csv_path, dtype={"image": str, "line_counting_validated": "Int64"})
-    result: dict[str, int] = {}
+        return {}, {}
+    df = pd.read_csv(csv_path, dtype={"image": str, "line_counting": "Int64", "line_counting_validated": "Int64"})
+    validated: dict[str, int] = {}
+    line_counts: dict[str, int] = {}
     for _, row in df.iterrows():
-        if pd.notna(row["line_counting_validated"]):
-            result[str(row["image"])] = int(row["line_counting_validated"])
-    return result
+        name = str(row["image"])
+        if pd.notna(row.get("line_counting")):
+            line_counts[name] = int(row["line_counting"])
+        if pd.notna(row.get("line_counting_validated")):
+            validated[name] = int(row["line_counting_validated"])
+    return validated, line_counts
 
 
-def _save_csv(folder: Path, images: List[Path], validated: dict) -> None:
-    """Write (or overwrite) validation_counting.csv from the *validated* dict."""
+def _save_csv(folder: Path, images: List[Path], line_counts: dict, validated: dict) -> None:
+    """Write (or overwrite) validation_counting.csv from in-memory dicts — no pkl loading."""
     rows = []
     for img in images:
-        data = _load_pkl(img)
-        if data is None:
+        n_lines = line_counts.get(img.name)
+        if n_lines is None:
             continue
         v = validated.get(img.name)
         rows.append({
             "image": img.name,
-            "line_counting": data["post"].n_lines,
+            "line_counting": n_lines,
             "line_counting_validated": int(v) if v is not None else "",
         })
     csv_path = _csv_path(folder)
@@ -144,21 +148,23 @@ def _render_annotated(data: dict) -> np.ndarray:
     return cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
 
 
-def _build_summary(images: List[Path], validated: dict) -> pd.DataFrame:
+def _build_summary(images: List[Path], line_counts: dict, validated: dict) -> pd.DataFrame:
+    """Build the summary table entirely from in-memory dicts — no pkl loading."""
     rows = []
     for img in images:
-        data = _load_pkl(img)
-        if data is None:
+        n_lines = line_counts.get(img.name)
+        if n_lines is None:
             continue
-        n_lines = data["post"].n_lines
         v = validated.get(img.name)
         rows.append({
             "Image": img.name,
             "Line counting": n_lines,
             "Validated line counting": int(v) if v is not None else None,
         })
-    df = pd.DataFrame(rows)
-    # Use nullable integer so Arrow serialisation works with missing values
+    if rows:
+        df = pd.DataFrame(rows)
+    else:
+        df = pd.DataFrame(columns=["Image", "Line counting", "Validated line counting"])
     df["Validated line counting"] = pd.array(
         df["Validated line counting"], dtype=pd.Int64Dtype()
     )
@@ -169,7 +175,7 @@ def _build_summary(images: List[Path], validated: dict) -> pd.DataFrame:
 # Session-state defaults
 # ---------------------------------------------------------------------------
 
-for _key, _default in {"folder": None, "images": [], "validated": {}, "img_idx": 0}.items():
+for _key, _default in {"folder": None, "images": [], "validated": {}, "line_counts": {}, "img_idx": 0}.items():
     if _key not in st.session_state:
         st.session_state[_key] = _default
 
@@ -191,16 +197,24 @@ with st.sidebar:
         if folder.is_dir():
             imgs = _find_images_with_pkl(folder)
             if imgs:
-                validated_map = _load_csv(folder)
-                # Start from the first image that has not been validated yet
+                validated_map, line_counts_map = _load_csv(folder)
+                # If no CSV exists yet, bootstrap line_counts from pkl files
+                if not line_counts_map:
+                    for img in imgs:
+                        d = _load_pkl(img)
+                        if d is not None:
+                            line_counts_map[img.name] = d["post"].n_lines
+                    # Create the CSV immediately so future renders are fast
+                    _save_csv(folder, imgs, line_counts_map, validated_map)
                 first_unvalidated_idx = next(
                     (i for i, img in enumerate(imgs) if img.name not in validated_map),
                     0,
                 )
-                st.session_state.folder    = folder
-                st.session_state.images    = imgs
-                st.session_state.validated = validated_map
-                st.session_state.img_idx   = first_unvalidated_idx
+                st.session_state.folder      = folder
+                st.session_state.images      = imgs
+                st.session_state.validated   = validated_map
+                st.session_state.line_counts = line_counts_map
+                st.session_state.img_idx     = first_unvalidated_idx
                 st.success(f"{len(imgs)} images found.")
             else:
                 st.warning("No images with associated .pkl found in results/.")
@@ -248,12 +262,19 @@ with st.sidebar:
 
             st.divider()
 
-            if st.button("✓ Validate", type="primary", use_container_width=True):
-                st.session_state.validated[img_path.name] = int(validated_val)
-                _save_csv(st.session_state.folder, images, st.session_state.validated)
-                next_i = idx + 1
-                st.session_state.img_idx = next_i if next_i < len(images) else idx
-                st.rerun()
+            already_validated = existing is not None
+            if already_validated:
+                if st.button("↺ Reset", type="secondary", use_container_width=True):
+                    st.session_state.validated.pop(img_path.name, None)
+                    _save_csv(st.session_state.folder, images, st.session_state.line_counts, st.session_state.validated)
+                    st.rerun()
+            else:
+                if st.button("✓ Validate", type="primary", use_container_width=True):
+                    st.session_state.validated[img_path.name] = int(validated_val)
+                    _save_csv(st.session_state.folder, images, st.session_state.line_counts, st.session_state.validated)
+                    next_i = idx + 1
+                    st.session_state.img_idx = next_i if next_i < len(images) else idx
+                    st.rerun()
 
             col_p, col_n = st.columns(2)
             with col_p:
@@ -291,7 +312,7 @@ with col_center:
 with col_right:
     st.subheader("All images")
 
-    df = _build_summary(images, st.session_state.validated)
+    df = _build_summary(images, st.session_state.line_counts, st.session_state.validated)
 
     def _row_style(row: pd.Series) -> list:
         if pd.notna(row["Validated line counting"]):

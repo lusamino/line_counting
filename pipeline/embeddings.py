@@ -62,6 +62,7 @@ class PageEmbedding:
     combined_vec   : concatenation of whichever sub-vectors were requested
     anomaly_score  : set by ``anomaly_scores()`` (higher = more anomalous)
     umap_xy        : 2-D coordinates set by ``compute_umap()``
+    umap_xyz       : 3-D coordinates set by ``compute_umap_3d()``
     """
     filename: str
     structural_vec: np.ndarray   # shape (N_STRUCTURAL,) or (0,)
@@ -70,6 +71,7 @@ class PageEmbedding:
     combined_vec: np.ndarray     # concatenation of requested sub-vectors
     anomaly_score: float = 0.0
     umap_xy: Optional[Tuple[float, float]] = None
+    umap_xyz: Optional[Tuple[float, float, float]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +387,81 @@ def compute_umap(
     coords = reducer.fit_transform(X)
     for emb, (x, y) in zip(embeddings, coords):
         emb.umap_xy = (float(x), float(y))
+    return embeddings
+
+
+def compute_umap_3d(
+    embeddings: List[PageEmbedding],
+    n_neighbors: int = 10,
+    min_dist: float = 0.1,
+    random_state: int = 42,
+) -> List[PageEmbedding]:
+    """Reduce embeddings to 3D with UMAP.
+
+    Stores the result in each PageEmbedding.umap_xyz.
+    Requires at least 4 samples.
+    """
+    if len(embeddings) < 4:
+        for e in embeddings:
+            e.umap_xyz = (0.0, 0.0, 0.0)
+        return embeddings
+
+    import umap
+
+    X = np.stack([e.combined_vec for e in embeddings])
+    reducer = umap.UMAP(
+        n_components=3,
+        n_neighbors=min(n_neighbors, len(embeddings) - 1),
+        min_dist=min_dist,
+        random_state=random_state,
+    )
+    coords = reducer.fit_transform(X)
+    for emb, (x, y, z) in zip(embeddings, coords):
+        emb.umap_xyz = (float(x), float(y), float(z))
+    return embeddings
+
+
+def load_embeddings_from_folder(
+    folder: "Path",
+    image_exts: tuple = (".jpg", ".jpeg", ".png", ".tif", ".tiff"),
+) -> List[PageEmbedding]:
+    """Load PageEmbedding objects from all pkl files in *folder/results/*.
+
+    Each pkl file is expected to be a dict with an ``"embedding"`` key
+    holding a ``PageEmbedding`` (as produced by ``run_pipeline.py``).
+    Files whose embedding is None are silently skipped.
+
+    Parameters
+    ----------
+    folder : Path-like
+        Directory that contains image files and a ``results/`` subfolder.
+    image_exts : tuple
+        Image file extensions to look for (determines which pkl files to scan).
+
+    Returns
+    -------
+    List[PageEmbedding]
+        Ordered by filename.
+    """
+    import pickle
+
+    folder = Path(folder)
+    results_dir = folder / "results"
+    if not results_dir.is_dir():
+        raise FileNotFoundError(f"results/ subfolder not found in {folder}")
+
+    embeddings: List[PageEmbedding] = []
+    for img_path in sorted(folder.iterdir()):
+        if img_path.suffix.lower() not in image_exts:
+            continue
+        pkl_path = results_dir / img_path.with_suffix(".pkl").name
+        if not pkl_path.is_file():
+            continue
+        with open(pkl_path, "rb") as fh:
+            data = pickle.load(fh)
+        emb = data.get("embedding")
+        if emb is not None:
+            embeddings.append(emb)
     return embeddings
 
 
