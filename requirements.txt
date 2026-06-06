@@ -14,3 +14,5 @@ pandas>=2.1
 Pillow>=10.0
 matplotlib>=3.8
 plotly>=5.18
+einops>=0.8.0
+ultralytics>=8.4.0

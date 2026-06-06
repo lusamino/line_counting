@@ -17,6 +17,14 @@ from .stages import (
 )
 from .postprocessing import remove_corner_bboxes, remove_narrow_bboxes, detect_and_split_gutter
 from .plots import plot_preprocess, plot_segment_kraken, plot_postprocess, plot_kraken_polygons, plot_combined_overlay
+from .decorations import (
+    ManuscriptPage,
+    DecorationModel,
+    CATEGORY_MAP,
+    CATEGORY_COLORS,
+    DEFAULT_CONFIDENCE,
+    DEFAULT_FLORENCE2_PROMPTS,
+)
 
 __all__ = [
     "binarise", "deskew", "preprocess",
@@ -30,4 +38,7 @@ __all__ = [
     "remove_corner_bboxes", "remove_narrow_bboxes", "detect_and_split_gutter",
     "plot_preprocess", "plot_segment_kraken", "plot_postprocess",
     "plot_kraken_polygons", "plot_combined_overlay",
+    "ManuscriptPage", "DecorationModel",
+    "CATEGORY_MAP", "CATEGORY_COLORS",
+    "DEFAULT_CONFIDENCE", "DEFAULT_FLORENCE2_PROMPTS",
 ]
