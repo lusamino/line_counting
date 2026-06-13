@@ -55,6 +55,7 @@ CATEGORY_MAP: dict[str, str] = {
     "defaultline":        "other",
     "headingline":        "other_interesting",
     "dropcapitalline":    "other_interesting",
+    "paragraphmark":      "paragraph_mark",
 }
 
 CATEGORY_COLORS: dict[str, tuple] = {
@@ -64,6 +65,7 @@ CATEGORY_COLORS: dict[str, tuple] = {
     "large_decoration":  (200, 140,  30),   # orange
     "other":             (160, 160, 160),   # grey
     "other_interesting": ( 50, 200, 200),   # teal
+    "paragraph_mark":    (200,  50, 200),   # magenta
 }
 
 DEFAULT_CONFIDENCE: float = 0.20
@@ -121,11 +123,19 @@ def _should_suppress(det: dict, kept: dict, iou_threshold: float, containment_th
 
 
 def _nms(detections: list, iou_threshold: float, containment_threshold: float) -> list:
-    """Class-agnostic NMS using IoU and containment suppression."""
+    """Per-class NMS using IoU and containment suppression.
+
+    Suppression only fires between boxes of the same category, so a
+    DropCapitalZone and a GraphicZone that overlap are both kept.
+    """
     sorted_dets = sorted(detections, key=lambda d: d["confidence"], reverse=True)
     kept = []
     for det in sorted_dets:
-        if not any(_should_suppress(det, k, iou_threshold, containment_threshold) for k in kept):
+        if not any(
+            k["category"] == det["category"]
+            and _should_suppress(det, k, iou_threshold, containment_threshold)
+            for k in kept
+        ):
             kept.append(det)
     return kept
 
@@ -268,6 +278,7 @@ class ManuscriptPage:
         exclude_categories: Optional[Set[str]] = None,
         figsize: tuple = (14, 10),
         save_dir: Optional[Path] = None,
+        flag_print: bool = True,
     ) -> None:
         """Overlay detection bounding boxes on the page image.
 
@@ -281,6 +292,8 @@ class ManuscriptPage:
             Directory to save the annotated image. Saved as
             ``<save_dir>/<stem>_decorations<suffix>``. Directory is created if
             it does not exist.
+        flag_print : bool, optional
+            Whether to print the save path. Defaults to True.
         """
         if exclude_categories is None:
             exclude_categories = {"other", "other_interesting"}
@@ -320,14 +333,17 @@ class ManuscriptPage:
         ax.axis("off")
         ax.legend(handles=legend_patches, loc="upper right", fontsize=9, framealpha=0.8)
         plt.tight_layout()
-        plt.show()
 
         if save_dir is not None:
             out_dir = Path(save_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / (self.image_path.stem + "_decorations" + self.image_path.suffix)
             cv2.imwrite(str(out_path), viz)
-            print(f"Saved: {out_path}")
+            plt.close(fig)
+            if flag_print:
+                print(f"Saved: {out_path}")
+        else:
+            plt.show()
 
     def plot_summary(
         self,
@@ -436,14 +452,21 @@ class DecorationModel:
         )
         print(f"Device: {self._device}")
 
-        if backend in ("florence2", "florence2_medieval"):
+        _as_path = Path(backend).expanduser().resolve()
+        _looks_like_path = _as_path.suffix == ".pt" or Path(backend).is_absolute()
+        if _as_path.is_file():
+            self._load_yolo_from_path(_as_path)
+        elif _looks_like_path:
+            raise FileNotFoundError(f"Checkpoint not found: {_as_path}")
+        elif backend in ("florence2", "florence2_medieval"):
             self._load_florence2(backend)
         elif backend in ("yolo", "medieval_yolo"):
             self._load_yolo(backend, size)
         else:
             raise ValueError(
                 f"Unknown backend {backend!r}. "
-                "Choose: 'medieval_yolo', 'yolo', 'florence2', 'florence2_medieval'."
+                "Pass a path to a local .pt checkpoint, or choose: "
+                "'medieval_yolo', 'yolo', 'florence2', 'florence2_medieval'."
             )
 
     # ── Model loading ─────────────────────────────────────────────────────────
@@ -479,6 +502,15 @@ class DecorationModel:
             GenerationConfig.from_model_config(self._florence.language_model.config)
         )
 
+    def _load_yolo_from_path(self, path: Path) -> None:
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            raise ImportError("Run: pip install ultralytics")
+        print(f"Loading YOLO from {path} …")
+        self._yolo = YOLO(str(path))
+        print(f"YOLO ready.  Classes: {list(self._yolo.names.values())}")
+
     def _load_yolo(self, backend: str, size: str) -> None:
         try:
             from ultralytics import YOLO
@@ -508,6 +540,9 @@ class DecorationModel:
         page: ManuscriptPage,
         remove_lines: bool = False,
         use_figure_mask: bool = False,
+        apply_nms: bool = True,
+        save_json: bool = False,
+        save_dir: str = None,
     ) -> List[dict]:
         """Run detection on a page and return post-processed detections.
 
@@ -518,6 +553,11 @@ class DecorationModel:
             Paint text-line polygons to background before inference.
         use_figure_mask : bool
             Restrict detection to figure_binary regions.
+        apply_nms : bool
+            Apply overlap suppression (IoU + containment) after postprocessing.
+        save_json : bool
+            Save detections to ``<results_dir>/<stem>_decorations.json``
+            alongside the pipeline pickle.
 
         Returns
         -------
@@ -525,9 +565,25 @@ class DecorationModel:
             Each dict has keys: x1, y1, x2, y2, confidence, raw_label,
             category, width, height, area_px.
         """
+        import json
+
         img = page.get_model_input(remove_lines=remove_lines, use_figure_mask=use_figure_mask)
         raw = self._infer(img)
-        return self._postprocess(raw)
+        detections = self._postprocess(raw, apply_nms=apply_nms)
+
+        if save_json:
+            if not save_dir:
+                out_path = (
+                    page.image_path.parent / "results" /
+                    (page.image_path.stem + "_decorations.json")
+                )
+            else:
+                out_path = Path(save_dir) / (page.image_path.stem + "_decorations.json")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w") as fh:
+                json.dump(detections, fh, indent=2)
+
+        return detections
 
     def _infer(self, img: np.ndarray) -> list:
         if self.backend == "florence2":
@@ -582,7 +638,7 @@ class DecorationModel:
                 raw.append((int(x1), int(y1), int(x2), int(y2), score, label))
         return raw
 
-    def _postprocess(self, raw: list) -> List[dict]:
+    def _postprocess(self, raw: list, apply_nms: bool = True) -> List[dict]:
         out = []
         for x1, y1, x2, y2, score, raw_label in raw:
             if score < self.confidence_threshold:
@@ -604,9 +660,12 @@ class DecorationModel:
                 "height":     y2 - y1,
                 "area_px":    (x2 - x1) * (y2 - y1),
             })
+        if not apply_nms:
+            return out
         relevant   = [d for d in out if d["category"] not in self.nms_exclude_categories]
         irrelevant = [d for d in out if d["category"]     in self.nms_exclude_categories]
         return _nms(relevant, self.iou_threshold, self.containment_threshold) + irrelevant
 
     def __repr__(self) -> str:
-        return f"DecorationModel(backend={self.backend!r}, conf≥{self.confidence_threshold})"
+        label = Path(self.backend).name if Path(self.backend).is_file() else self.backend
+        return f"DecorationModel(backend={label!r}, conf≥{self.confidence_threshold})"

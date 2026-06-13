@@ -395,29 +395,48 @@ def compute_umap_3d(
     n_neighbors: int = 10,
     min_dist: float = 0.1,
     random_state: int = 42,
+    also_2d: bool = False,
 ) -> List[PageEmbedding]:
-    """Reduce embeddings to 3D with UMAP.
+    """Reduce embeddings to 3D with UMAP, optionally also to 2D.
 
-    Stores the result in each PageEmbedding.umap_xyz.
+    Stores 3D coords in each PageEmbedding.umap_xyz.
+    When also_2d=True, runs a separate 2D fit and stores in umap_xy
+    (2D and 3D are independent UMAP optimisations, not a slice of each other).
     Requires at least 4 samples.
     """
     if len(embeddings) < 4:
         for e in embeddings:
             e.umap_xyz = (0.0, 0.0, 0.0)
+            if also_2d:
+                e.umap_xy = (0.0, 0.0)
         return embeddings
 
     import umap
 
     X = np.stack([e.combined_vec for e in embeddings])
-    reducer = umap.UMAP(
+    n_nbrs = min(n_neighbors, len(embeddings) - 1)
+
+    reducer_3d = umap.UMAP(
         n_components=3,
-        n_neighbors=min(n_neighbors, len(embeddings) - 1),
+        n_neighbors=n_nbrs,
         min_dist=min_dist,
         random_state=random_state,
     )
-    coords = reducer.fit_transform(X)
-    for emb, (x, y, z) in zip(embeddings, coords):
+    coords_3d = reducer_3d.fit_transform(X)
+    for emb, (x, y, z) in zip(embeddings, coords_3d):
         emb.umap_xyz = (float(x), float(y), float(z))
+
+    if also_2d:
+        reducer_2d = umap.UMAP(
+            n_components=2,
+            n_neighbors=n_nbrs,
+            min_dist=min_dist,
+            random_state=random_state,
+        )
+        coords_2d = reducer_2d.fit_transform(X)
+        for emb, (x, y) in zip(embeddings, coords_2d):
+            emb.umap_xy = (float(x), float(y))
+
     return embeddings
 
 
